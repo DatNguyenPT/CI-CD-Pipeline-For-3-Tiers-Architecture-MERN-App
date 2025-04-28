@@ -1,0 +1,141 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'BE_VERSION', 
+               defaultValue: '1.0.0', 
+               description: 'Version tag for the Backend Docker image')
+        string(name: 'FE_VERSION', 
+               defaultValue: '1.0.0', 
+               description: 'Version tag for the Frontend Docker image')
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 10, unit: 'MINUTES')
+    }
+
+    environment {
+        KUBECONFIG = '/home/ubuntu/.kube/config'
+        K8S_CREDENTIAL_ID = 'k8s'
+        KUBERNETES_NAMESPACE = 'three-tier'
+        KUBERNETES_SA = 'jenkins-deployer' 
+        ECR_USERNAME = credentials('ecr-username')
+        ECR_PASSWORD = credentials('ecr-password')
+        AWS_ACCOUNT_ID = credentials('ACCOUNT_ID')
+        AWS_ECR_REPO_NAME = credentials('ECR_REPO2')
+        AWS_DEFAULT_REGION = '<define your AWS region>' // e.g., 'us-east-1' 
+        REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        AWS_CREDS = credentials('AWS_CREDS')
+        K8S_SERVER='<define your K8S server>' // e.g., 'https://master-ip:6443
+    }
+
+    stages {
+        stage('Cleaning Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/DatNguyenPT/MERN-APP.git', // You can use your own repo
+                    credentialsId: 'git-creds'
+                stash name: 'source-code', includes: 'Kubernetes-Manifests-file/**/*'
+            }
+        }
+
+        stage('Pull Images from ECR (for Kubernetes)') {
+            steps {
+                script {
+                    def beImageUri = "${env.REPOSITORY_URI}/private-repo:backend-v${params.BE_VERSION}"
+                    def feImageUri = "${env.REPOSITORY_URI}/private-repo:frontend-v${params.FE_VERSION}"
+
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'AWS_CREDS',
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ]]) {
+                        // ECR login
+                        sh "aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${REPOSITORY_URI}"
+
+                        // Pull images
+                        sh "docker pull ${feImageUri}"
+                        sh "docker pull ${beImageUri}"
+                    }
+                }
+            }
+        }
+
+
+        stage('Apply Ingress') {
+            steps {
+                unstash 'source-code'
+                withCredentials([string(credentialsId: "${K8S_CREDENTIAL_ID}", variable: 'K8S_TOKEN')]) {
+                   sh """
+                        find Kubernetes-Manifests-file/Database -type f ! -name 'configmap.yaml' -exec kubectl apply -f {} \
+                        --token ${K8S_TOKEN} \
+                        --server ${K8S_SERVER} \
+                        --namespace=${KUBERNETES_NAMESPACE} \
+                        --insecure-skip-tls-verify \
+                        --validate=false \\;
+                    """
+                }
+            }
+        }
+
+        stage('Deploy Database') {
+            steps {
+                unstash 'source-code'
+                withCredentials([string(credentialsId: "${K8S_CREDENTIAL_ID}", variable: 'K8S_TOKEN')]) {
+                    sh """
+                        kubectl apply -f Kubernetes-Manifests-file/Database \
+                        --token ${K8S_TOKEN} \
+                        --server ${K8S_SERVER} \
+                        --namespace=${KUBERNETES_NAMESPACE} \
+                        --recursive \
+                        --insecure-skip-tls-verify \
+                        --validate=false
+                    """
+                }
+            }
+        }
+
+        stage('Deploy Frontend') {
+            steps {
+                unstash 'source-code'
+                withCredentials([string(credentialsId: "${K8S_CREDENTIAL_ID}", variable: 'K8S_TOKEN')]) {
+                    sh """
+                        kubectl apply -f Kubernetes-Manifests-file/Frontend \
+                        --token ${K8S_TOKEN} \
+                        --server ${K8S_SERVER} \
+                        --namespace=${KUBERNETES_NAMESPACE} \
+                        --recursive \
+                        --insecure-skip-tls-verify \
+                        --validate=false
+                    """
+                }
+            }
+        }
+
+        stage('Deploy Backend') {
+            steps {
+                unstash 'source-code'
+                withCredentials([string(credentialsId: "${K8S_CREDENTIAL_ID}", variable: 'K8S_TOKEN')]) {
+                    sh """
+                        kubectl apply -f Kubernetes-Manifests-file/Backend \
+                        --token ${K8S_TOKEN} \
+                        --server ${K8S_SERVER} \
+                        --namespace=${KUBERNETES_NAMESPACE} \
+                        --recursive \
+                        --insecure-skip-tls-verify \
+                        --validate=false
+                    """
+                }
+            }
+        }
+    }
+}

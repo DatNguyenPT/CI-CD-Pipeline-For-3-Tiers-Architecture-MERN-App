@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-config
+  namespace: three-tier
+data:
+  connection_string: "mongodb://mongodb-svc.three-tier.svc.cluster.local:27017/todo?directConnection=true"

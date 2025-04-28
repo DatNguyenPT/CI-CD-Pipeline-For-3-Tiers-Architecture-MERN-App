@@ -1,0 +1,35 @@
+all:
+  hosts:
+    master01:
+      ansible_host: public-ip-01
+      ip: private-ip-01
+      access_ip: private-ip-01
+      ansible_user: ubuntu
+      ansible_become: yes
+      ansible_become_user: root
+      ansible_become_method: sudo
+    worker01:
+      ansible_host: public-ip-02
+      ip: private-ip-02
+      access_ip: private-ip-02
+      ansible_user: ubuntu
+      ansible_become: yes
+      ansible_become_user: root
+      ansible_become_method: sudo
+
+  children:
+    kube_control_plane:
+      hosts:
+        master01:
+    kube_node:
+      hosts:
+        worker01:
+    etcd:
+      hosts:
+        master01:
+    k8s_cluster:
+      children:
+        kube_control_plane:
+        kube_node:
+    calico_rr:
+      hosts: {}

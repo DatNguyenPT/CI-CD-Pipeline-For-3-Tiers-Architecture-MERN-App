@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: three-tier
+  labels:
+    app: mongodb
+    tier: database
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mongodb
+      tier: database
+  template:
+    metadata:
+      labels:
+        app: mongodb
+        tier: database
+    spec:
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsGroup: 999
+      initContainers:
+      - name: fix-permissions
+        image: busybox
+        command: 
+        - sh
+        - -c
+        - |
+          mkdir -p /data/db &&
+          chmod -R 777 /data/db &&
+          chown -R 999:999 /data/db
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - name: mongo-volume
+          mountPath: /data/db
+      containers:
+      - name: mongodb
+        image: mongo:4.4.6
+        command:
+        - "mongod"
+        - "--bind_ip"
+        - "0.0.0.0"
+        ports:
+        - containerPort: 27017
+          name: mongodb
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        env:
+        - name: MONGO_INITDB_ROOT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: mongo-sec
+              key: username
+        - name: MONGO_INITDB_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mongo-sec
+              key: password
+        volumeMounts:
+        - name: mongo-volume
+          mountPath: /data/db
+      volumes:
+      - name: mongo-volume
+        persistentVolumeClaim:
+          claimName: mongo-volume-claim

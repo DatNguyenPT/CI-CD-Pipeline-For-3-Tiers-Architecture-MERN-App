@@ -1,0 +1,115 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'VERSION_TAG', 
+               defaultValue: 'v1.0.0', 
+               description: 'Version tag for the Docker image')
+    }
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 10, unit: 'MINUTES')
+    }
+    tools {
+        jdk 'jdk-17'
+        nodejs 'node-latest-14'
+    }
+    environment {
+        SCANNER_HOME = 'sonar-scanner'
+        AWS_ACCOUNT_ID = credentials('ACCOUNT_ID')
+        AWS_ACCESS_KEY = credentials('AWS_ACCESS_KEY')
+        AWS_SECRET_KEY = credentials('AWS_SECRET_KEY')
+        AWS_ECR_REPO_NAME = credentials('ECR_REPO2')
+        AWS_DEFAULT_REGION = 'us-east-1'    
+        REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        GIT_USER_NAME = credentials('GIT_USER')
+        GIT_USER_EMAIL = credentials('GIT_EMAIL')
+        VERSION_TAG = "${params.VERSION_TAG ?: 'v1.0.0'}"
+    }
+    stages {
+        stage('Cleaning Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/DatNguyenPT/MERN-APP.git', // You can use your own repo
+                    credentialsId: 'git-creds'
+                stash name: 'source-code', includes: '**/*'
+            }
+        }
+        stage('Security Analysis') {
+            parallel {
+                stage('Sonarqube Analysis') {
+                    agent { label 'Agent1' }
+                    steps {
+                        unstash 'source-code'
+                        dir('backend') {
+                            withSonarQubeEnv('sonar-server') {
+                                sh """${tool 'sonar-scanner'}/bin/sonar-scanner \
+                                    -Dsonar.projectName=three-tier-backend \
+                                    -Dsonar.projectKey=three-tier-backend \
+                                    -Dsonar.sources=. \
+                                    -Dsonar.inclusions=**/*.js"""
+                            }
+                        }
+                    }
+                }
+                stage('OWASP Dependency-Check Scan') {
+                    steps {
+                        unstash 'source-code'
+                        dir('backend') {
+                            dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'dp-check'
+                            dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                        }
+                    }
+                }
+                stage('Trivy FS Scan') {
+                    steps {
+                        unstash 'source-code'
+                        dir('backend') {
+                            sh 'trivy fs . > trivyfs.txt'
+                        }
+                    }
+                }
+            }
+        }
+        stage('Quality Check') {
+            agent { label 'Agent1' }
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
+                }
+            }
+        }
+        stage('Docker Image Build') {
+            steps {
+                script {
+                    dir('backend') {
+                        sh 'docker system prune -f'
+                        sh 'docker container prune -f'
+                        // Tag the image with VERSION_TAG
+                        sh "docker build -t ${REPOSITORY_URI}/${AWS_ECR_REPO_NAME}:backend-${VERSION_TAG} ."
+                    }
+                }
+            }
+        }
+        stage("TRIVY Image Scan") {
+            steps {
+                sh "trivy image ${REPOSITORY_URI}/${AWS_ECR_REPO_NAME}:backend-${VERSION_TAG} > trivyimage.txt"
+            }
+        }
+        stage("ECR Image Pushing") {
+            steps {
+                script {
+                    sh """aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${REPOSITORY_URI}"""
+                    sh """docker tag ${REPOSITORY_URI}/${AWS_ECR_REPO_NAME}:backend-${VERSION_TAG} ${REPOSITORY_URI}/${AWS_ECR_REPO_NAME}:backend-${VERSION_TAG}"""
+                    sh """docker push ${REPOSITORY_URI}/${AWS_ECR_REPO_NAME}:backend-${VERSION_TAG}"""
+                }
+            }
+        }
+    }
+}
